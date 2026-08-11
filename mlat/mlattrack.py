@@ -506,7 +506,13 @@ def _cluster_timestamps(component, min_receivers):
                         can_cluster = False
                         break
 
-                    d = receiver.distance[other_receiver.uid]
+                    # Same lazy distance table as clocktrack: compute on a miss
+                    # rather than have every pair precomputed on connect.
+                    d = receiver.distance.get(other_receiver.uid, -1.0)
+                    if d < 0:
+                        d = geodesy.ecef_distance(receiver.position, other_receiver.position)
+                        receiver.distance[other_receiver.uid] = d
+                        other_receiver.distance[receiver.uid] = d
                     if abs(other_timestamp - timestamp) > (d * 1.05 + 1e3) / constants.Cair:
                         #glogger.info("   discard: delta {dt:.1f}us > max {m:.1f}us for range {d:.1f}m".format(
                         #    dt=abs(other_timestamp - timestamp)*1e6,

@@ -148,6 +148,7 @@ cdef _add_to_existing_syncpoint(dict clock_pairs, SyncPoint syncpoint, r0, doubl
     cdef double td1B, i1
     cdef int cat
     cdef double p0, p1, limit
+    cdef double dist
     cdef dict distances = r0.distance
     cdef ClockPairing pairing
 
@@ -171,7 +172,17 @@ cdef _add_to_existing_syncpoint(dict clock_pairs, SyncPoint syncpoint, r0, doubl
                 # odd, but could happen
                 continue
 
-            cat = (int) (distances[r1.uid] / 50e3)
+            # Lazy: the distance table is no longer precomputed for every pair
+            # of receivers on connect. Miss => compute once and keep it, on
+            # both sides so whichever of the two syncs next also hits.
+            # ecef_distance here is the module-local cdef, not the Python one.
+            dist = distances.get(r1.uid, -1.0)
+            if dist < 0:
+                dist = ecef_distance(r0.position, r1.position)
+                distances[r1.uid] = dist
+                r1.distance[r0.uid] = dist
+
+            cat = (int) (dist / 50e3)
             if cat > 3:
                 cat = 3
 
