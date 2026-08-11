@@ -578,13 +578,19 @@ class Coordinator(object):
         """Drop distance entries for receivers that have gone away."""
         live = self.receivers.keys()
         dropped = 0
+        kept = 0
         for receiver in list(self.receivers.values()):
             stale = [uid for uid in receiver.distance if uid not in live]
             for uid in stale:
                 del receiver.distance[uid]
             dropped += len(stale)
-        if dropped:
-            glogger.info("swept %d stale inter-station distance entries", dropped)
+            kept += len(receiver.distance)
+        # Logged unconditionally, including a zero sweep. Logging only when it
+        # dropped something makes silence ambiguous — you cannot tell "nothing
+        # to do" from "never ran", which is exactly the question you ask when
+        # you are wondering whether the lazy table is growing without bound.
+        glogger.info("distance sweep: dropped %d stale, kept %d live entries across %d receivers",
+                     dropped, kept, len(self.receivers))
 
     async def write_profile(self):
         while True:
