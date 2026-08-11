@@ -506,6 +506,26 @@ class JsonClient(connection.Connection):
     def _flush_zlib(self):
         self._pending_flush = None
 
+        # The peer can vanish between scheduling this timer and its firing.
+        # close() cancels the pending flush, but a peer that resets the
+        # connection itself never goes through close(): the transport is
+        # already gone while self.transport still refers to it, and write()
+        # then raises RuntimeError from inside uvloop. That produced 89
+        # tracebacks in 27 minutes under reconnect churn — noise that costs a
+        # stack unwind each time and hides real errors in the log.
+        if self.transport is None or self.transport.is_closing():
+            self._writebuf = []
+            return
+
+        try:
+            self._flush_zlib_locked()
+        except (RuntimeError, ConnectionError, OSError):
+            # Lost the peer mid-flush — the window the check above can't close.
+            # Whatever was buffered is undeliverable; the read side will notice
+            # and tear the client down properly.
+            self._writebuf = []
+
+    def _flush_zlib_locked(self):
         data = bytearray(2)
         pending = False
         for line in self._writebuf:
