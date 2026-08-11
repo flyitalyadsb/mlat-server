@@ -82,6 +82,14 @@ class Receiver(object):
         self.mapLon = 0
         self.mapAlt = 0
 
+        # Inter-station distances to other receivers, keyed by their uid.
+        # POPULATED LAZILY by its readers (clocktrack.pyx, mlattrack.py), which
+        # compute-and-store on a miss. It used to be filled eagerly for every
+        # other receiver on connect and emptied entry-by-entry on disconnect —
+        # two O(N) passes per event which, at ~1.5k receivers and ~325
+        # connect/disconnect cycles a minute, burned 21% of the server's single
+        # core and held an O(N^2) table. Lazily it only ever holds the pairs
+        # that actually synced, which is a small neighbourhood per receiver.
         self.distance = {}
 
         # timestamp this receiver last synced with the result being a valid clock pair
@@ -540,6 +548,7 @@ class Coordinator(object):
 
 
     async def every_15(self):
+        cycles = 0
         while True:
             sleep = asyncio.create_task(asyncio.sleep(self.main_interval))
             try:
@@ -548,7 +557,34 @@ class Coordinator(object):
             except Exception:
                 glogger.exception("Failed to write state files")
 
+            # Periodic sweep of the lazy distance tables. This replaces the
+            # per-disconnect O(N) cleanup: doing it on every disconnect cost 17%
+            # of the core under reconnect churn, whereas amortising it over ~15
+            # minutes costs nothing measurable. Stale entries are harmless in
+            # the meantime — uidCounter is monotonic to 2^62, so a departed
+            # receiver's uid is never handed to a new one and a stale entry can
+            # never be read as somebody else's distance.
+            cycles += 1
+            if cycles * self.main_interval >= 900:
+                cycles = 0
+                try:
+                    self._sweep_distances()
+                except Exception:
+                    glogger.exception("Failed to sweep distance tables")
+
             await sleep
+
+    def _sweep_distances(self):
+        """Drop distance entries for receivers that have gone away."""
+        live = self.receivers.keys()
+        dropped = 0
+        for receiver in list(self.receivers.values()):
+            stale = [uid for uid in receiver.distance if uid not in live]
+            for uid in stale:
+                del receiver.distance[uid]
+            dropped += len(stale)
+        if dropped:
+            glogger.info("swept %d stale inter-station distance entries", dropped)
 
     async def write_profile(self):
         while True:
@@ -596,24 +632,11 @@ class Coordinator(object):
         if self.authenticator is not None:
             self.authenticator(receiver, auth)  # may raise ValueError if authentication fails
 
-        self._compute_interstation_distances(receiver)
-
         self.receivers[receiver.uid] = receiver
         self.usernames[receiver.user] = receiver
         if receiver.user.startswith(config.DEBUG_FOCUS):
             receiver.focus = True
         return receiver
-
-    def _compute_interstation_distances(self, receiver):
-        """compute inter-station distances for a receiver"""
-
-        for other_receiver in self.receivers.values():
-            if other_receiver is receiver:
-                distance = 0
-            else:
-                distance = geodesy.ecef_distance(receiver.position, other_receiver.position)
-            receiver.distance[other_receiver.uid] = distance
-            other_receiver.distance[receiver.uid] = distance
 
     @profile.trackcpu
     def receiver_location_update(self, receiver, position_llh):
@@ -637,8 +660,6 @@ class Coordinator(object):
             r.mapLon = round(round(r.position_llh[1] * precision) / precision + offY, 2)
             r.mapAlt = 50 * round(r.position_llh[2]/50)
 
-        self._compute_interstation_distances(receiver)
-
     @profile.trackcpu
     def receiver_disconnect(self, receiver):
         """Notes that the given receiver has disconnected."""
@@ -648,10 +669,6 @@ class Coordinator(object):
         self.clock_tracker.receiver_disconnect(receiver)
         self.receivers.pop(receiver.uid)
         self.usernames.pop(receiver.user)
-
-        # clean up old distance entries
-        for other_receiver in self.receivers.values():
-            other_receiver.distance.pop(receiver.uid, None)
 
     @profile.trackcpu
     def receiver_tracking_add(self, receiver, icao_set):

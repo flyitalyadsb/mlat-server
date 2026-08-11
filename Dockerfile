@@ -8,8 +8,15 @@ RUN export BUILD_DEPS="libopenblas-dev liblapack-dev libmpfr-dev libmpc-dev libg
     apt-get purge -y --auto-remove $BUILD_DEPS && \
     rm -rf /var/lib/apt/lists/*
 COPY . .
+# setuptools<81 is REQUIRED, not tidiness: pygraph (python-graph-core, imported
+# by clocktrack) does `__import__('pkg_resources')`, and setuptools removed
+# pkg_resources in 81. Unpinned, `pip install setuptools` resolves to 84 today
+# and the server dies at import with ModuleNotFoundError: pkg_resources, before
+# it serves a single client. The image running in production was built when the
+# resolver still returned 65.5.1, so this was latent — any rebuild produced a
+# broken image, including the nightly cron.
 RUN apt-get update && apt-get -y install gcc && \
-    pip install setuptools && \
+    pip install "setuptools<81" && \
     python3 setup.py build_ext --inplace && \
     apt-get purge -y --auto-remove gcc && \
     rm -rf /var/lib/apt/lists/*
