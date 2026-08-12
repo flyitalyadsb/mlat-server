@@ -568,8 +568,12 @@ class Coordinator(object):
             elapsed = now - last_cycle
             last_cycle = now
             if elapsed > self.main_interval * 2:
-                glogger.info("event loop running late: %.1fs for a %.0fs cycle",
-                             elapsed, self.main_interval)
+                # warning, not info: mlat-server sets every root handler to
+                # WARNING (see the `mlat-server` script), so info() is silently
+                # dropped. The Status line you see in the logs is warning() for
+                # the same reason.
+                glogger.warning("event loop running late: %.1fs for a %.0fs cycle",
+                                elapsed, self.main_interval)
 
             # Periodic sweep of the lazy distance tables, replacing the
             # per-disconnect O(N) cleanup that cost 17% of the core.
@@ -605,8 +609,10 @@ class Coordinator(object):
         # dropped something makes silence ambiguous — you cannot tell "nothing
         # to do" from "never ran", which is exactly the question you ask when
         # you are wondering whether the lazy table is growing without bound.
-        glogger.info("distance sweep: dropped %d stale, kept %d live entries across %d receivers",
-                     dropped, kept, len(self.receivers))
+        # warning, not info — see above. Logged at every sweep including a
+        # zero one, so silence means "did not run" rather than "nothing to do".
+        glogger.warning("distance sweep: dropped %d stale, kept %d live entries across %d receivers",
+                        dropped, kept, len(self.receivers))
 
     async def write_profile(self):
         while True:
