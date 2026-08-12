@@ -179,6 +179,13 @@ class JsonClient(connection.Connection):
 
         self.transport = writer.transport
         peer = self.transport.get_extra_info('peername')
+        if peer is None:
+            # The peer can hang up between accept() and here, and then
+            # get_extra_info returns None — `peer[0]` raised TypeError, which
+            # start_client logged as a full traceback (21 in 32 minutes under
+            # reconnect churn). There is no connection left to serve, so fail
+            # with something the caller can log in one line.
+            raise ConnectionResetError('peer disappeared before setup')
         self.host = peer[0]
         self.port = peer[1]
 
