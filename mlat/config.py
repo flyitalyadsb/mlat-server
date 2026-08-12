@@ -18,6 +18,8 @@
 
 """Poor man's configuration system, because I'm lazy.."""
 
+import os
+
 from mlat import constants
 
 # Location at which _this copy_ of the server code may be found. This URL will
@@ -35,9 +37,13 @@ AGPL_SERVER_CODE_URL = "https://github.com/adsblol/mlat-server"
 MIN_NUC = 6
 
 # maximum number of planes we use for sync per receiver (randomly chosen every 15 seconds):
-MAX_SYNC_AC = 15
+# Overridable at runtime: on a busy server, handling the incoming sync messages is
+# by far the most expensive thing we do (measured: 37% of CPU in receiver_sync ->
+# clocktrack), and these two are the only knobs that bound how many of them we ask
+# for. Lowering them trades clock sync quality for headroom. Defaults are unchanged.
+MAX_SYNC_AC = int(os.getenv("MLAT_SERVER_MAX_SYNC_AC", "15"))
 # max sync rate
-MAX_SYNC_RATE = 12
+MAX_SYNC_RATE = float(os.getenv("MLAT_SERVER_MAX_SYNC_RATE", "12"))
 
 # minimum interval between trying to get an MLAT position
 RESOLVE_INTERVAL = 0.15
