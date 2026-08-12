@@ -548,7 +548,8 @@ class Coordinator(object):
 
 
     async def every_15(self):
-        cycles = 0
+        last_sweep = time.monotonic()
+        last_cycle = time.monotonic()
         while True:
             sleep = asyncio.create_task(asyncio.sleep(self.main_interval))
             try:
@@ -557,16 +558,31 @@ class Coordinator(object):
             except Exception:
                 glogger.exception("Failed to write state files")
 
-            # Periodic sweep of the lazy distance tables. This replaces the
-            # per-disconnect O(N) cleanup: doing it on every disconnect cost 17%
-            # of the core under reconnect churn, whereas amortising it over ~15
-            # minutes costs nothing measurable. Stale entries are harmless in
-            # the meantime — uidCounter is monotonic to 2^62, so a departed
-            # receiver's uid is never handed to a new one and a stale entry can
-            # never be read as somebody else's distance.
-            cycles += 1
-            if cycles * self.main_interval >= 900:
-                cycles = 0
+            now = time.monotonic()
+
+            # This loop is a saturation thermometer. It asks for main_interval
+            # (15s) but only gets it if the event loop is keeping up; measured
+            # at 23-34s while the core was pegged. Worth logging when it drifts
+            # badly, because it is the same lateness the clients experience as
+            # missing keepalives before they time out at 60s.
+            elapsed = now - last_cycle
+            last_cycle = now
+            if elapsed > self.main_interval * 2:
+                glogger.info("event loop running late: %.1fs for a %.0fs cycle",
+                             elapsed, self.main_interval)
+
+            # Periodic sweep of the lazy distance tables, replacing the
+            # per-disconnect O(N) cleanup that cost 17% of the core.
+            #
+            # Timed off the clock, NOT off a cycle count. Counting cycles and
+            # multiplying by main_interval assumes each cycle takes 15s; when
+            # they actually took 23-34s the sweep drifted to ~30 minutes and
+            # got later the busier the server was — i.e. it backed off exactly
+            # when it was most needed. Stale entries stay harmless regardless:
+            # uidCounter is monotonic to 2^62, so a departed receiver's uid is
+            # never reissued.
+            if now - last_sweep >= 900:
+                last_sweep = now
                 try:
                     self._sweep_distances()
                 except Exception:

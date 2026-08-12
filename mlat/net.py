@@ -81,6 +81,11 @@ class MonitoringListener(object):
             newclient = self._new_client(r, w)
             self.clients.append(newclient)
             self.monitoring.append(asyncio.ensure_future(self.monitor_client(newclient)))
+        except ConnectionResetError as e:
+            # Benign race, not a fault: the client hung up before setup
+            # finished. One line, no traceback — these are frequent under
+            # reconnect churn and a stack trace each would bury real errors.
+            self.logger.info('client gone before setup: %s', e)
         except Exception:
             self.logger.exception('Exception handling client')
 
