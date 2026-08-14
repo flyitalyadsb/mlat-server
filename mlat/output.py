@@ -152,6 +152,24 @@ class LocalCSVWriter(object):
             # swallow the exception so we don't affect our caller
 
 
+# mlat/client/coordinator.py's false_ac trick forwards Mode A/C squawks by
+# building a fake DF11 whose decoded 24-bit address equals
+# int(str(squawk_message).ljust(6, '0')) % 1000000 - always <= 999999
+# (0xF423F), since the source is a decimal digit string. A resolved fix for
+# one of these has no real aircraft identity behind it (it's keyed by
+# squawk alone, shared by any number of simultaneous real aircraft) and
+# would otherwise reach readsb indistinguishable from a genuine Mode-S MLAT
+# fix (readsb's SBS parser has no non-ICAO concept for wire-format
+# addresses, see decodeSbsLine in net_io.c). Suppressing anything in this
+# range keeps fake-address fixes from ever leaving the server. Trade-off:
+# a real aircraft legitimately allocated an ICAO address in this low range
+# would also be suppressed here if a fix for it ever landed on this output
+# handler - accepted, since real-address collisions in this specific range
+# are rare and the alternative is a Mode-A/C ghost track masquerading as a
+# normal aircraft on the public map.
+FAKE_MODEAC_ADDR_MAX = 0xF423F
+
+
 class BasestationClient(object):
     """Writes results in Basestation port-30003 format to network clients."""
 
@@ -219,6 +237,8 @@ class BasestationClient(object):
             return
 
     def write_result(self, receive_timestamp, address, ecef, ecef_cov, receivers, distinct, dof, kalman_data, error):
+        if address <= FAKE_MODEAC_ADDR_MAX:
+            return
         try:
             ac = self.coordinator.tracker.aircraft[address]
 
