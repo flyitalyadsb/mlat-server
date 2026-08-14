@@ -476,6 +476,15 @@ class JsonClient(connection.Connection):
                     "return_results": self.use_return_results,
                     "return_stats": self.return_stats,
                     "rate_reports": True,
+                    # Client-side field, honored by clients new enough to
+                    # forward Mode A/C (mlat/client/jsonclient.py sets
+                    # coordinator.forward_all_ac from this key). The
+                    # class-level client default is True, which skips the
+                    # client's own dedup against squawks/altitudes already
+                    # seen from a tracked Mode-S aircraft. This server never
+                    # sent the key before, so that dedup was always dead
+                    # code in production. Explicit False restores it.
+                    "forward_all_ac": False,
                     "motd": expanded_motd}
 
         if self.use_udp:
