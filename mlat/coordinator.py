@@ -668,9 +668,12 @@ class Coordinator(object):
 
         self.receivers[receiver.uid] = receiver
         self.usernames[receiver.user] = receiver
-        if uuid:
+        if uuid and isinstance(uuid, str):
             # last connection with a given uuid wins, matching the existing
             # handshake behavior for duplicate uuids (see process_handshake).
+            # Some clients send a non-string (e.g. a list) uuid in the
+            # handshake; skip indexing those rather than crash on an
+            # unhashable dict key - they're just not bridge-eligible.
             self.uuid_index[uuid] = receiver
         if receiver.user.startswith(config.DEBUG_FOCUS):
             receiver.focus = True
@@ -707,7 +710,7 @@ class Coordinator(object):
         self.clock_tracker.receiver_disconnect(receiver)
         self.receivers.pop(receiver.uid)
         self.usernames.pop(receiver.user)
-        if receiver.uuid and self.uuid_index.get(receiver.uuid) is receiver:
+        if receiver.uuid and isinstance(receiver.uuid, str) and self.uuid_index.get(receiver.uuid) is receiver:
             self.uuid_index.pop(receiver.uuid, None)
 
     @profile.trackcpu
