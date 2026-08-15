@@ -31,7 +31,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from mlat import util
 asyncio.set_event_loop(util.mainLoop)
 
-from mlat import jsonclient, output, coordinator
+from mlat import jsonclient, output, coordinator, acbridge
 
 def hostport(s):
     parts = s.split(':')
@@ -107,6 +107,10 @@ class MlatServer(object):
                             type=str,
                             help="set the server MOTD sent to clients.",
                             default="")
+        parser.add_argument('--bridge-listen',
+                            help="listen on a [host:]udp_port for the internal-only Mode A/C bridge side channel (see mlat/acbridge.py). Not for use by ordinary clients.",  # noqa
+                            type=port_or_hostport,
+                            default=None)
 
     def add_output_args(self, parser):
         parser.add_argument('--write-csv',
@@ -180,6 +184,12 @@ class MlatServer(object):
                                                           udp_port=udp_port,
                                                           coordinator=self.coordinator,
                                                           motd=args.motd))
+
+        if args.bridge_listen:
+            bridge_host, bridge_port = args.bridge_listen
+            subtasks.append(acbridge.BridgeListener(host=bridge_host,
+                                                    port=bridge_port,
+                                                    coordinator=self.coordinator))
 
         return subtasks
 
