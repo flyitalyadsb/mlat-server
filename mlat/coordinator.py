@@ -193,6 +193,12 @@ class Coordinator(object):
         # receivers:
         self.receivers = {} # keyed by uid
         self.usernames = {} # keyed by usernames
+        # keyed by receiver.uuid (only receivers that sent one). Lets an
+        # internal-only side channel (the Mode A/C bridge) submit mlat
+        # candidate messages "as" an already-connected receiver - reusing its
+        # already-established position and clock sync state - without a new
+        # Receiver object or new sync peers. See bridge_listen in main.py.
+        self.uuid_index = {}
 
         self.sighup_handlers = []
         self.authenticator = authenticator
@@ -662,6 +668,10 @@ class Coordinator(object):
 
         self.receivers[receiver.uid] = receiver
         self.usernames[receiver.user] = receiver
+        if uuid:
+            # last connection with a given uuid wins, matching the existing
+            # handshake behavior for duplicate uuids (see process_handshake).
+            self.uuid_index[uuid] = receiver
         if receiver.user.startswith(config.DEBUG_FOCUS):
             receiver.focus = True
         return receiver
@@ -697,6 +707,8 @@ class Coordinator(object):
         self.clock_tracker.receiver_disconnect(receiver)
         self.receivers.pop(receiver.uid)
         self.usernames.pop(receiver.user)
+        if receiver.uuid and self.uuid_index.get(receiver.uuid) is receiver:
+            self.uuid_index.pop(receiver.uuid, None)
 
     @profile.trackcpu
     def receiver_tracking_add(self, receiver, icao_set):
