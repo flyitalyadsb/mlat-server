@@ -137,8 +137,21 @@ class MlatTracker(object):
         if not decoded or not decoded.address:
             return
 
+        # Temporary diagnostic (2026-08-16): only logs for addresses matching
+        # the false_ac signature (mlat-client's Mode A/C bridge trick always
+        # produces a decimal-round address, see acbridge.py false_ac_message)
+        # - near-zero volume against real traffic (0 natural hits found in a
+        # 71k-line mlat.csv scan on 2026-08-15). Traces exactly which check
+        # bails so a live end-to-end acbridge test doesn't have to guess
+        # blind. Safe to strip once the resolve path is verified end-to-end.
+        _dbg = (decoded.address % 100 == 0)
+        if _dbg:
+            glogger.info("acbridge-dbg {a:06x}: decoded ok, copies={c}".format(a=decoded.address, c=len(group.copies)))
+
         ac = self.tracker.aircraft.get(decoded.address)
         if not ac:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: no ac in tracker".format(a=decoded.address))
             return
         now = time.time()
         ac.seen = now
@@ -188,6 +201,8 @@ class MlatTracker(object):
             ac.callsign = decoded.callsign
 
         if now - ac.last_resolve_attempt < config.RESOLVE_INTERVAL:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: RESOLVE_INTERVAL gate".format(a=decoded.address))
             return
         ac.last_resolve_attempt = now
 
@@ -209,6 +224,8 @@ class MlatTracker(object):
             elapsed = 0
 
         if elapsed < config.RESOLVE_BACKOFF:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: RESOLVE_BACKOFF gate, elapsed={e:.3f}".format(a=decoded.address, e=elapsed))
             return
 
         # find altitude
@@ -228,8 +245,12 @@ class MlatTracker(object):
         max_dof = len_copies + altitude_dof - 4
 
         if max_dof < 0:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: max_dof<0 (copies={c} altitude_dof={ad})".format(a=decoded.address, c=len_copies, ad=altitude_dof))
             return
         if elapsed < 2 * config.RESOLVE_BACKOFF and max_dof < last_result_dof - elapsed + 0.5:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: max_dof backoff gate".format(a=decoded.address))
             return
 
         # construct a map of receiver -> list of timestamps
@@ -241,11 +262,19 @@ class MlatTracker(object):
         dof = len(timestamp_map) + altitude_dof - 4
 
         if dof < 0:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: dof<0 (distinct_receivers={d} altitude_dof={ad})".format(a=decoded.address, d=len(timestamp_map), ad=altitude_dof))
             return
         if elapsed < 2 * config.RESOLVE_BACKOFF and dof < last_result_dof - elapsed + 0.5:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: dof backoff gate".format(a=decoded.address))
             return
 
         self.coordinator.stats_normalize += 1
+
+        if _dbg:
+            glogger.info("acbridge-dbg {a:06x}: calling normalize2 with {n} receivers: {rs}".format(
+                a=decoded.address, n=len(timestamp_map), rs=[r.user for r in timestamp_map.keys()]))
 
         # normalize timestamps. This returns a list of timestamp maps;
         # within each map, the timestamp values are comparable to each other.
@@ -253,8 +282,14 @@ class MlatTracker(object):
             components = clocktrack.normalize2(clocktracker=self.clock_tracker,
                                              timestamp_map=timestamp_map)
         except Exception as e:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: normalize2 raised {e}".format(a=decoded.address, e=e))
             traceback.print_exc()
             return
+
+        if _dbg:
+            glogger.info("acbridge-dbg {a:06x}: normalize2 returned {n} component(s), sizes={sizes}".format(
+                a=decoded.address, n=len(components), sizes=[len(c) for c in components]))
 
         # cluster timestamps into clusters that are probably copies of the
         # same transmission.
@@ -265,7 +300,12 @@ class MlatTracker(object):
                 clusters.extend(_cluster_timestamps(component, min_component_size))
 
         if not clusters:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: no clusters formed (min_component_size={m})".format(a=decoded.address, m=min_component_size))
             return
+
+        if _dbg:
+            glogger.info("acbridge-dbg {a:06x}: {n} cluster(s) formed".format(a=decoded.address, n=len(clusters)))
 
         # start from the most recent, largest, cluster
         result = None
@@ -281,6 +321,8 @@ class MlatTracker(object):
             dof = distinct + altitude_dof - 4
 
             if elapsed < 2 and dof < last_result_dof - elapsed + 0.5:
+                if _dbg:
+                    glogger.info("acbridge-dbg {a:06x}: cluster-loop elapsed/dof gate, distinct={d}".format(a=decoded.address, d=distinct))
                 return
 
             # assume 250ft accuracy at the time it is reported
@@ -298,6 +340,8 @@ class MlatTracker(object):
             cluster.sort(key=operator.itemgetter(1))  # sort by increasing timestamp (todo: just assume descending..)
 
             if elapsed > 30 and dof == 0:
+                if _dbg:
+                    glogger.info("acbridge-dbg {a:06x}: skip cluster (elapsed>30 and dof==0)".format(a=decoded.address))
                 continue
 
             if elapsed < 60:
@@ -307,6 +351,10 @@ class MlatTracker(object):
 
             self.coordinator.stats_solve_attempt += 1
             r = solver.solve(cluster, altitude, altitude_error, initial_guess)
+
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: solver.solve returned {r} (distinct={d} altitude={alt} initial_guess={ig})".format(
+                    a=decoded.address, r=('result' if r else None), d=distinct, alt=altitude, ig=initial_guess))
 
             if r:
                 # estimate the error
@@ -319,6 +367,8 @@ class MlatTracker(object):
                     var_est = max_error * max_error
                     #glogger.warn('{a:06X} {e:7.3f} '.format(a=decoded.address, e=999.999) + str([line[0].user for line in cluster]))
                     # don't use this
+                    if _dbg:
+                        glogger.info("acbridge-dbg {a:06x}: ecef_cov is None, result suspect, skipped".format(a=decoded.address))
                     continue
 
                 error = int(math.sqrt(abs(var_est)))
@@ -329,6 +379,8 @@ class MlatTracker(object):
                     glogger.warn('{a:06X} {e:8.1f} {lat:7.3f},{lon:7.3f},{alt:5.0f} '.format(a=decoded.address, e=error/1000, lat=lat, lon=lon, alt=alt) + str([line[0].user for line in cluster]))
 
                 if error > max_error:
+                    if _dbg:
+                        glogger.info("acbridge-dbg {a:06x}: error {e} > max_error {m}, skipped".format(a=decoded.address, e=error, m=max_error))
                     continue
 
 
@@ -336,9 +388,13 @@ class MlatTracker(object):
 
                 # the higher the accuracy, the higher the freqency of positions that is output
                 if elapsed / 20 < error / max_error:
+                    if _dbg:
+                        glogger.info("acbridge-dbg {a:06x}: throttled by accuracy/frequency gate, skipped".format(a=decoded.address))
                     continue
 
                 self.coordinator.stats_solve_used += 1
+                if _dbg:
+                    glogger.info("acbridge-dbg {a:06x}: ACCEPTED result, error={e}".format(a=decoded.address, e=error))
 
                 #if elapsed < 10.0 and var_est > last_result_var * 2.25:
                 #    # much less accurate than a recent-ish position
@@ -348,6 +404,8 @@ class MlatTracker(object):
                 result = r
 
         if not result:
+            if _dbg:
+                glogger.info("acbridge-dbg {a:06x}: no cluster produced an accepted result".format(a=decoded.address))
             return
 
         ecef, ecef_cov = result
