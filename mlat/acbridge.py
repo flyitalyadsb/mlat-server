@@ -44,6 +44,8 @@ import time
 
 import ujson
 
+import modes_cython.message
+
 glogger = logging.getLogger("acbridge")
 
 # Same staleness/health gate JsonClient.process_message applies before
@@ -81,6 +83,24 @@ class BridgeProtocol(asyncio.DatagramProtocol):
         if receiver.bad_syncs > 0 or now - receiver.last_sync > MAX_SYNC_AGE:
             self.dropped_bad_sync += 1
             return
+
+        # Register tracking interest for this address before submitting a
+        # candidate for it - mirrors what a real mlat-client's "seen"
+        # protocol message does (jsonclient.py process_seen_message ->
+        # Tracker.add) before it ever sends an "mlat" message for that
+        # address. Without this, mlattrack.py's _resolve() bails out
+        # immediately at `ac = self.tracker.aircraft.get(address); if not
+        # ac: return` - the address was never auto-vivified into the
+        # tracker, no matter how many receivers report it or how good the
+        # timing is. Confirmed live (2026-08-15): a synthetic 3-receiver
+        # submission using real, physically-consistent timestamps (reused
+        # from an actual simultaneous real ADS-B reception) produced zero
+        # output in mlat.csv until this call was added. Tracker.add() is
+        # idempotent and purely additive (never removes a receiver's own
+        # real tracking set), so this is safe to call on every datagram.
+        decoded = modes_cython.message.decode(m)
+        if decoded and decoded.address:
+            self.coordinator.receiver_tracking_add(receiver, {decoded.address})
 
         self.coordinator.receiver_mlat(receiver, t, m, now)
 
