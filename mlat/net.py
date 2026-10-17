@@ -55,9 +55,16 @@ class MonitoringListener(object):
     # override as needed:
 
     async def _start(self):
+        # backlog: asyncio's default is 100. When the single-threaded event
+        # loop runs late (seen 37-118 s behind at peak), 100 pending accepts
+        # overflow at once: the kernel drops SYNs (ListenOverflows 17M on the
+        # NA shard, 91M on EU), every reconnect burst fails, and so does a TCP
+        # readiness probe. The pod's net.core.somaxconn is 4096; mlat-proxy
+        # already listens with 2048.
         self.tcp_server = await asyncio.start_server(self.start_client,
                                                           host=self.host,
-                                                          port=self.port)
+                                                          port=self.port,
+                                                          backlog=1024)
         for s in self.tcp_server.sockets:
             name = s.getsockname()
             self.logger.warning("{what} listening on {host}:{port} (TCP)".format(host=name[0],
