@@ -346,6 +346,10 @@ class JsonClient(connection.Connection):
         notes = []
 
         rawline = await asyncio.wait_for(self.r.readline(), timeout=15.0)
+        if not rawline:
+            # Closed before sending a byte: the kubelet's TCP readiness probe,
+            # every 10 s on every shard. Nothing to refuse and no one to tell.
+            return False
         try:
             line = rawline.decode('ascii')
             if line.startswith('PROXY '):
