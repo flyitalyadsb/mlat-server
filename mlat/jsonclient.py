@@ -34,11 +34,15 @@ import math
 import re
 
 from mlat import constants, geodesy
-from mlat import net, util, connection, config
+from mlat import net, util, connection, config, identity
 
 
 glogger = logging.getLogger("client")
 random.seed()
+
+
+class DuplicateReceiver(ValueError):
+    """The handshake is a second, live connection of a connected receiver."""
 
 
 class JsonClientListener(net.MonitoringListener):
@@ -300,7 +304,12 @@ class JsonClient(connection.Connection):
         #self.logger.info("Accepted new client connection")
 
         try:
-            await self.process_handshake()
+            if not await self.process_handshake():
+                # Refused (it already said why, and close() runs below).
+                # Carrying on would read messages with no reader set up: a
+                # kubelet TCP probe, connecting and leaving without a line,
+                # logged an AttributeError traceback every 10 s per shard.
+                return
 
             # start heartbeat handling now that the handshake is done
             self._last_message_time = time.time()
@@ -326,8 +335,14 @@ class JsonClient(connection.Connection):
 
     async def process_handshake(self):
         deny = None
+        deny_reconnect = util.fuzzy(900)
+        notes = []
 
         rawline = await asyncio.wait_for(self.r.readline(), timeout=15.0)
+        if not rawline:
+            # Closed before sending a byte: the kubelet's TCP readiness probe,
+            # every 10 s on every shard. Nothing to refuse and no one to tell.
+            return False
         try:
             line = rawline.decode('ascii')
             if line.startswith('PROXY '):
@@ -356,6 +371,13 @@ class JsonClient(connection.Connection):
 
                 user = str(hs['user'])
                 uuid = hs.get('uuid')
+                # The sample .env's placeholder is no identity: kept as one,
+                # it made unrelated stations a single receiver (identity.py).
+                if identity.is_placeholder_uuid(uuid):
+                    uuid = None
+                    notes.append('Your MLAT client sends the placeholder uuid of the sample .env (XXXXXXXX-...).'
+                                 ' Set your own, from `cat /proc/sys/kernel/random/uuid`, so this server can tell'
+                                 ' your receiver apart from the others that kept the placeholder.')
 
                 # replace bad characters with an underscore
                 user = re.sub("[^A-Za-z0-9_.-]", r'_', user)
@@ -364,18 +386,6 @@ class JsonClient(connection.Connection):
                     user = user[:40]
                 if len(user) < 3:
                     user = user + '_' + str(random.randrange(10,99))
-
-                if user in self.coordinator.usernames:
-                    existingReceiver = self.coordinator.usernames[user]
-
-                    if uuid and uuid == existingReceiver.uuid:
-                        # if we have another user with the same uuid, disconnect the existing user
-                        existingReceiver.connection.close()
-                    else:
-                        tries = 1000
-                        while tries > 0 and user in self.coordinator.usernames:
-                            tries -= 1
-                            user = user + '_' + str(random.randrange(100,999))
 
 
                 peer_compression_methods = set(hs['compress'])
@@ -406,6 +416,35 @@ class JsonClient(connection.Connection):
                 alt = float(hs['alt'])
                 if alt < -1000 or alt > 10000:
                     raise ValueError('invalid altitude, should be -1000 .. 10000')
+
+                if user in self.coordinator.usernames:
+                    existingReceiver = self.coordinator.usernames[user]
+
+                    if identity.same_receiver(existingReceiver.uuid, existingReceiver.position_llh,
+                                              uuid, (lat, lon, alt)):
+                        if identity.is_live(existingReceiver.connection._last_message_time, time.time()):
+                            # Two live clients of one receiver: refuse the new
+                            # one instead of kicking the old, and let it retry
+                            # once the old one could have gone quiet
+                            # (identity.py). The other refusals use 900 s.
+                            deny_reconnect = util.fuzzy(identity.retry_after(
+                                existingReceiver.connection._last_message_time, time.time()))
+                            raise DuplicateReceiver(
+                                'Receiver {user} is already connected to this server and still sending. Are two'
+                                ' MLAT clients of this receiver pointed here (e.g. both ports 30100 and 31090, or'
+                                ' a second host)? Keep one.'.format(user=user))
+                        # The old connection went quiet: this is the receiver
+                        # coming back, so the new connection takes over.
+                        existingReceiver.connection.close()
+                    else:
+                        requested = user
+                        tries = 1000
+                        while tries > 0 and user in self.coordinator.usernames:
+                            tries -= 1
+                            user = user + '_' + str(random.randrange(100,999))
+                        notes.append('The name {requested} is taken by another receiver: you are connected as'
+                                     ' {user}. Set a name of your own (MLAT_USER).'.format(requested=requested,
+                                                                                         user=user))
 
                 clock_type = str(hs.get('clock_type', 'dump1090'))
 
@@ -447,6 +486,9 @@ class JsonClient(connection.Connection):
                 #else:
                 self.process_mlat = self.process_mlat_nongps
 
+            except DuplicateReceiver as e:
+                deny = str(e)
+
             except KeyError as e:
                 deny = 'Missing field in handshake: ' + str(e)
 
@@ -455,19 +497,20 @@ class JsonClient(connection.Connection):
 
         if deny:
             self.logger.warning('Handshake failed: %s', deny)
-            self.write_raw(deny=[deny], reconnect_in=util.fuzzy(900))
+            self.write_raw(deny=[deny], reconnect_in=deny_reconnect)
             return False
 
         expanded_motd = """
 
         {motd}
-
+        {notes}
         The multilateration server source code is available under
         the terms of the Affero GPL (v3 or later). You may obtain
         a copy of this server's source code at the following
         location: {agpl_url}
         """.format(agpl_url=config.AGPL_SERVER_CODE_URL,
-                   motd=self.motd)
+                   motd=self.motd,
+                   notes=''.join('\n        ' + n + '\n' for n in notes))
 
         response = {"compress": self.compress,
                     "reconnect_in": util.fuzzy(10),
