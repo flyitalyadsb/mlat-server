@@ -154,20 +154,25 @@ class LocalCSVWriter(object):
 
 # mlat/client/coordinator.py's false_ac trick forwards Mode A/C squawks by
 # building a fake DF11 whose decoded 24-bit address equals
-# int(str(squawk_message).ljust(6, '0')) % 1000000 - always <= 999999
-# (0xF423F), since the source is a decimal digit string. A resolved fix for
-# one of these has no real aircraft identity behind it (it's keyed by
-# squawk alone, shared by any number of simultaneous real aircraft) and
-# would otherwise reach readsb indistinguishable from a genuine Mode-S MLAT
-# fix (readsb's SBS parser has no non-ICAO concept for wire-format
-# addresses, see decodeSbsLine in net_io.c). Suppressing anything in this
-# range keeps fake-address fixes from ever leaving the server. Trade-off:
-# a real aircraft legitimately allocated an ICAO address in this low range
-# would also be suppressed here if a fix for it ever landed on this output
-# handler - accepted, since real-address collisions in this specific range
-# are rare and the alternative is a Mode-A/C ghost track masquerading as a
-# normal aircraft on the public map.
-FAKE_MODEAC_ADDR_MAX = 0xF423F
+# int(str(squawk_message).ljust(6, '0')) % 1000000: a decimal number of four
+# digits 0-8 followed by "00" (coordinator.py only lets through payloads of
+# digits '0'..'8'). A resolved fix for one of these has no real aircraft
+# identity behind it (it's keyed by squawk alone, shared by any number of
+# simultaneous real aircraft) and would otherwise reach readsb
+# indistinguishable from a genuine Mode-S MLAT fix (readsb's SBS parser has
+# no non-ICAO concept for wire-format addresses, see decodeSbsLine in
+# net_io.c), so those addresses never leave the server.
+#
+# Until 2026-10-24 this suppressed EVERY address <= 0xF423F (999999). That
+# range is real ICAO allocations too (Mexico XA-, Panama, Egypt, Algeria,
+# South Africa, Trinidad...): since 2026-08-15, 99.5% of the "Mode A/C"
+# fixes it hid decoded to registered aircraft. Only the exact pattern is
+# fake; a real address that happens to match it (about 0.7% of the low
+# range) is still hidden - the same rule as mlat-ng's is_false_ac_address.
+def is_fake_modeac_address(address):
+    if address > 999999 or address % 100:
+        return False
+    return all(c <= '8' for c in '%06d' % address)
 
 
 class BasestationClient(object):
@@ -237,7 +242,7 @@ class BasestationClient(object):
             return
 
     def write_result(self, receive_timestamp, address, ecef, ecef_cov, receivers, distinct, dof, kalman_data, error):
-        if address <= FAKE_MODEAC_ADDR_MAX:
+        if is_fake_modeac_address(address):
             return
         try:
             ac = self.coordinator.tracker.aircraft[address]
