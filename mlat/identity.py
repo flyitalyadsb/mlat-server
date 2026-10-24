@@ -44,6 +44,11 @@ import math
 # quiet at once, so 45 s tells the two apart.
 LIVE_S = 45.0
 
+# A refused duplicate retries this long after the old connection would stop
+# counting as live (retry_after), so a client that only came back early gets
+# in on its next try.
+RETRY_MARGIN_S = 15.0
+
 # Two receivers with the same name and no uuid closer than this are one
 # receiver connected twice: two antennas this close would be useless to
 # each other for MLAT anyway.
@@ -82,3 +87,19 @@ def same_receiver(existing_uuid, existing_llh, uuid, llh):
 def is_live(last_message_time, now):
     """Whether a connection has sent anything in the last LIVE_S seconds."""
     return last_message_time is not None and now - last_message_time < LIVE_S
+
+
+def retry_after(last_message_time, now):
+    """Seconds a refused duplicate should wait before trying again: until the
+    old connection would no longer count as live, plus RETRY_MARGIN_S.
+
+    A mass reconnect (an mlat-proxy rollout) brings most clients back while
+    the server still holds their old connection, quiet for a second or two.
+    With a fixed 300 s retry they all stayed out for five minutes (2026-10-24
+    01:33 UTC: 3,175 -> ~1,230 MLAT feeders for 4.5 min). Waiting out only the
+    liveness window lets them back within a minute. A real second client of a
+    live receiver is refused again on each try, at one cheap handshake a
+    minute: the old connection is never touched."""
+    if last_message_time is None:
+        return RETRY_MARGIN_S
+    return max(0.0, LIVE_S - (now - last_message_time)) + RETRY_MARGIN_S

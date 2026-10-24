@@ -40,13 +40,6 @@ from mlat import net, util, connection, config, identity
 glogger = logging.getLogger("client")
 random.seed()
 
-# A second live connection of a receiver that is already connected is told to
-# retry after this long (the other handshake refusals use 900 s). Short enough
-# that a receiver wrongly taken for its own duplicate is back in minutes; long
-# enough that a duplicate costs one handshake every few minutes, not six a
-# minute as when the two took turns kicking each other out.
-DUPLICATE_RETRY_S = 300
-
 
 class DuplicateReceiver(ValueError):
     """The handshake is a second, live connection of a connected receiver."""
@@ -431,8 +424,11 @@ class JsonClient(connection.Connection):
                                               uuid, (lat, lon, alt)):
                         if identity.is_live(existingReceiver.connection._last_message_time, time.time()):
                             # Two live clients of one receiver: refuse the new
-                            # one instead of kicking the old (identity.py).
-                            deny_reconnect = util.fuzzy(DUPLICATE_RETRY_S)
+                            # one instead of kicking the old, and let it retry
+                            # once the old one could have gone quiet
+                            # (identity.py). The other refusals use 900 s.
+                            deny_reconnect = util.fuzzy(identity.retry_after(
+                                existingReceiver.connection._last_message_time, time.time()))
                             raise DuplicateReceiver(
                                 'Receiver {user} is already connected to this server and still sending. Are two'
                                 ' MLAT clients of this receiver pointed here (e.g. both ports 30100 and 31090, or'
